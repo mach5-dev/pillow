@@ -1,7 +1,15 @@
+/* Bundled so the print looks the same everywhere (Cousine Bold, see fonts/LICENSE-Cousine.txt) */
+@font-face {
+  font-family: "Print Mono";
+  src: url("fonts/cousine-latin-700-normal.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+
 :root {
   --ink: #2343b8;
   --linen: #ece3cf;
-  --mono: "Lucida Console", "Monaco", "DejaVu Sans Mono", "Menlo", "Consolas", monospace;
+  --mono: "Print Mono", "Lucida Console", "Monaco", "DejaVu Sans Mono", "Menlo", "Consolas", monospace;
 }
 
 * { box-sizing: border-box; }
@@ -18,9 +26,9 @@ body {
   cursor: pointer;
 }
 
-/* The whole page is one printed cloth that scrolls with the text */
+/* The whole page is one printed cloth; field.js scrolls the print with the page */
 .cloth {
-  position: absolute;
+  position: fixed;
   inset: 0;
   z-index: -1;
   overflow: hidden;
@@ -32,7 +40,6 @@ body {
   width: 100%;
   height: 100%;
   display: block;
-  transition: opacity 2.4s ease;
 }
 
 /* Soft folds of light and shadow, plus a fine weave */
@@ -131,7 +138,3 @@ main {
 }
 
 .label-note { color: #6b665c; max-width: 30rem; }
-
-@media (prefers-reduced-motion: reduce) {
-  .field { transition: none; }
-}

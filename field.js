@@ -1,163 +1,206 @@
-// Prints a cosmic-microwave-background style noise field across the whole page.
-// Click anywhere (or "New universe") to reprint it with a fresh seed.
+// Animates a cosmic-microwave-background style noise field across the whole page
+// with a WebGL shader. The field slowly boils in place and scrolls with the page.
+// Click anywhere (or "New universe") to dissolve into a fresh universe.
 
 (() => {
-  // Blue -> pale -> orange, sampled from the cushion in the photo.
-  const PALETTE = [
-    [0.00, [14, 64, 190]],
-    [0.20, [40, 132, 230]],
-    [0.38, [86, 182, 236]],
-    [0.50, [214, 232, 222]],
-    [0.60, [248, 210, 160]],
-    [0.78, [241, 140, 64]],
-    [1.00, [214, 72, 30]],
-  ];
-
-  // Wavelength in CSS pixels and weight: mostly fine speckle, some large-scale swell.
-  const OCTAVES = [
-    [6, 0.3],
-    [12, 1.0],
-    [22, 0.7],
-    [55, 0.4],
-    [170, 0.35],
-  ];
-
-  const RENDER_SCALE = 0.5; // render at half resolution; CSS upscaling softens it like dye in fabric
-  const DRIFT_MS = 15000;
+  const RENDER_SCALE = 0.5; // half resolution; CSS upscaling softens it like dye in fabric
+  const RESEED_MS = 1800;
 
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const canvas = document.querySelector('.field');
+  const gl = canvas.getContext('webgl', {antialias: false});
+  if (!gl) return; // body background colour stands in
 
-  function mulberry32(seed) {
-    return () => {
-      seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
-      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
+  const VERT = `
+    attribute vec2 p;
+    void main() { gl_Position = vec4(p, 0.0, 1.0); }
+  `;
 
-  // Classic 2D gradient noise with a seeded permutation table.
-  function makeNoise(rand) {
-    const perm = new Uint8Array(512);
-    const p = Array.from({length: 256}, (_, i) => i);
-    for (let i = 255; i > 0; i--) {
-      const j = Math.floor(rand() * (i + 1));
-      [p[i], p[j]] = [p[j], p[i]];
+  // 3D simplex noise by Ian McEwan & Stefan Gustavson (webgl-noise, MIT).
+  const FRAG = `
+    precision highp float;
+    uniform vec2 uSize;      // canvas size in pixels
+    uniform float uScale;    // canvas pixels per CSS pixel
+    uniform float uScroll;   // page scroll in CSS pixels
+    uniform float uTime;
+    uniform vec2 uSeedA, uSeedB;
+    uniform float uMix;
+
+    vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+    vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+    vec4 permute(vec4 x) { return mod289(((x * 34.0) + 10.0) * x); }
+    vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+    float snoise(vec3 v) {
+      const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
+      const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+      vec3 i = floor(v + dot(v, C.yyy));
+      vec3 x0 = v - i + dot(i, C.xxx);
+      vec3 g = step(x0.yzx, x0.xyz);
+      vec3 l = 1.0 - g;
+      vec3 i1 = min(g.xyz, l.zxy);
+      vec3 i2 = max(g.xyz, l.zxy);
+      vec3 x1 = x0 - i1 + C.xxx;
+      vec3 x2 = x0 - i2 + C.yyy;
+      vec3 x3 = x0 - D.yyy;
+      i = mod289(i);
+      vec4 p = permute(permute(permute(
+                i.z + vec4(0.0, i1.z, i2.z, 1.0))
+              + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+              + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+      float n_ = 0.142857142857;
+      vec3 ns = n_ * D.wyz - D.xzx;
+      vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+      vec4 x_ = floor(j * ns.z);
+      vec4 y_ = floor(j - 7.0 * x_);
+      vec4 x = x_ * ns.x + ns.yyyy;
+      vec4 y = y_ * ns.x + ns.yyyy;
+      vec4 h = 1.0 - abs(x) - abs(y);
+      vec4 b0 = vec4(x.xy, y.xy);
+      vec4 b1 = vec4(x.zw, y.zw);
+      vec4 s0 = floor(b0) * 2.0 + 1.0;
+      vec4 s1 = floor(b1) * 2.0 + 1.0;
+      vec4 sh = -step(h, vec4(0.0));
+      vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+      vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+      vec3 p0 = vec3(a0.xy, h.x);
+      vec3 p1 = vec3(a0.zw, h.y);
+      vec3 p2 = vec3(a1.xy, h.z);
+      vec3 p3 = vec3(a1.zw, h.w);
+      vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+      p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+      vec4 m = max(0.5 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+      m = m * m;
+      return 105.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
     }
-    for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
-    const gx = new Float32Array(256), gy = new Float32Array(256);
-    for (let i = 0; i < 256; i++) {
-      const a = rand() * Math.PI * 2;
-      gx[i] = Math.cos(a); gy[i] = Math.sin(a);
+
+    // Wavelengths in CSS px: mostly fine speckle, some large-scale swell.
+    // Fine grains boil faster than the broad swells.
+    float field(vec2 q, vec2 seed) {
+      float t = uTime;
+      float v = 0.0;
+      v += 0.20 * snoise(vec3(q / 8.0   + seed,       t * 0.22));
+      v += 1.00 * snoise(vec3(q / 16.0  + seed * 1.7, t * 0.13));
+      v += 0.70 * snoise(vec3(q / 30.0  + seed * 2.3, t * 0.08));
+      v += 0.40 * snoise(vec3(q / 70.0  + seed * 3.1, t * 0.05));
+      v += 0.35 * snoise(vec3(q / 200.0 + seed * 4.7, t * 0.03));
+      return v;
     }
-    const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
-    return (x, y) => {
-      const xi = Math.floor(x), yi = Math.floor(y);
-      const xf = x - xi, yf = y - yi;
-      const X = xi & 255, Y = yi & 255;
-      const dot = (h, dx, dy) => gx[h] * dx + gy[h] * dy;
-      const aa = perm[perm[X] + Y], ab = perm[perm[X] + Y + 1];
-      const ba = perm[perm[X + 1] + Y], bb = perm[perm[X + 1] + Y + 1];
-      const u = fade(xf), v = fade(yf);
-      const x1 = dot(aa, xf, yf) + u * (dot(ba, xf - 1, yf) - dot(aa, xf, yf));
-      const x2 = dot(ab, xf, yf - 1) + u * (dot(bb, xf - 1, yf - 1) - dot(ab, xf, yf - 1));
-      return x1 + v * (x2 - x1);
-    };
-  }
 
-  function colourAt(t, out) {
-    let i = 1;
-    while (i < PALETTE.length - 1 && t > PALETTE[i][0]) i++;
-    const [t0, c0] = PALETTE[i - 1], [t1, c1] = PALETTE[i];
-    const k = Math.min(1, Math.max(0, (t - t0) / (t1 - t0)));
-    out[0] = c0[0] + (c1[0] - c0[0]) * k;
-    out[1] = c0[1] + (c1[1] - c0[1]) * k;
-    out[2] = c0[2] + (c1[2] - c0[2]) * k;
-  }
+    // Blue -> pale -> orange, sampled from the cushion in the photo.
+    vec3 palette(float t) {
+      vec3 c0 = vec3(14.0, 64.0, 190.0) / 255.0;
+      vec3 c1 = vec3(40.0, 132.0, 230.0) / 255.0;
+      vec3 c2 = vec3(86.0, 182.0, 236.0) / 255.0;
+      vec3 c3 = vec3(214.0, 232.0, 222.0) / 255.0;
+      vec3 c4 = vec3(248.0, 210.0, 160.0) / 255.0;
+      vec3 c5 = vec3(241.0, 140.0, 64.0) / 255.0;
+      vec3 c6 = vec3(214.0, 72.0, 30.0) / 255.0;
+      t = clamp(t, 0.0, 1.0);
+      if (t < 0.20) return mix(c0, c1, t / 0.20);
+      if (t < 0.38) return mix(c1, c2, (t - 0.20) / 0.18);
+      if (t < 0.50) return mix(c2, c3, (t - 0.38) / 0.12);
+      if (t < 0.60) return mix(c3, c4, (t - 0.50) / 0.10);
+      if (t < 0.78) return mix(c4, c5, (t - 0.60) / 0.18);
+      return mix(c5, c6, (t - 0.78) / 0.22);
+    }
 
-  function paint(canvas, seed) {
-    const rect = canvas.getBoundingClientRect();
-    const w = Math.max(8, Math.round(rect.width * RENDER_SCALE));
-    const h = Math.max(8, Math.round(rect.height * RENDER_SCALE));
-    canvas.width = w;
-    canvas.height = h;
-
-    const rand = mulberry32(seed);
-    const layers = OCTAVES.map(([wavelength, weight]) => ({
-      noise: makeNoise(rand),
-      freq: 1 / (wavelength * RENDER_SCALE),
-      weight,
-      ox: rand() * 1000,
-      oy: rand() * 1000,
-    }));
-
-    const values = new Float32Array(w * h);
-    let sum = 0, sumSq = 0;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        let v = 0;
-        for (const L of layers) v += L.weight * L.noise(x * L.freq + L.ox, y * L.freq + L.oy);
-        values[y * w + x] = v;
-        sum += v; sumSq += v * v;
+    void main() {
+      vec2 q = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y) / uScale;
+      q.y += uScroll;
+      float v = field(q, uSeedB);
+      if (uMix < 1.0) {
+        // Rescale so the blend keeps full contrast instead of greying out halfway.
+        float m = smoothstep(0.0, 1.0, uMix);
+        v = (field(q, uSeedA) * (1.0 - m) + v * m) / length(vec2(1.0 - m, m));
       }
+      gl_FragColor = vec4(palette(0.5 + v / 2.4), 1.0);
     }
-    const mean = sum / values.length;
-    const std = Math.sqrt(Math.max(1e-9, sumSq / values.length - mean * mean));
+  `;
 
-    const ctx = canvas.getContext('2d');
-    const img = ctx.createImageData(w, h);
-    const rgb = [0, 0, 0];
-    for (let i = 0; i < values.length; i++) {
-      colourAt(0.5 + (values[i] - mean) / (std * 5.2), rgb);
-      img.data[i * 4] = rgb[0];
-      img.data[i * 4 + 1] = rgb[1];
-      img.data[i * 4 + 2] = rgb[2];
-      img.data[i * 4 + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
   }
 
-  const cloth = document.querySelector('.cloth');
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
 
-  // Lay a freshly printed canvas over the old one and fade it in.
-  function reprint(seed) {
-    const old = cloth.querySelector('.field:last-of-type');
-    const next = old.cloneNode(false);
-    next.dataset.seed = seed;
-    next.style.opacity = '0';
-    old.after(next);
-    paint(next, seed);
-    requestAnimationFrame(() => requestAnimationFrame(() => { next.style.opacity = '1'; }));
-    const cleanup = () => cloth.querySelectorAll('.field').forEach((c) => c !== next && c.remove());
-    if (reduceMotion) cleanup();
-    else next.addEventListener('transitionend', cleanup, {once: true});
+  // One oversized triangle covering the screen.
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  const u = Object.fromEntries(
+    ['uSize', 'uScale', 'uScroll', 'uTime', 'uSeedA', 'uSeedB', 'uMix']
+      .map((name) => [name, gl.getUniformLocation(prog, name)]));
+
+  const randomSeed = () => [Math.random() * 500, Math.random() * 500];
+  let seedA = [19.65, 3.8], seedB = seedA;
+  let reseedAt = -Infinity;
+
+  function resize() {
+    const w = Math.max(8, Math.round(innerWidth * RENDER_SCALE));
+    const h = Math.max(8, Math.round(innerHeight * RENDER_SCALE));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
   }
 
-  const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
-  const first = cloth.querySelector('.field');
-  paint(first, Number(first.dataset.seed));
+  // Returns true while a reseed dissolve is still in progress.
+  function draw(now) {
+    resize();
+    const mixT = Math.min(1, (now - reseedAt) / RESEED_MS);
+    gl.uniform2f(u.uSize, canvas.width, canvas.height);
+    gl.uniform1f(u.uScale, RENDER_SCALE);
+    gl.uniform1f(u.uScroll, scrollY);
+    gl.uniform1f(u.uTime, reduceMotion ? 0 : now / 1000);
+    gl.uniform2fv(u.uSeedA, seedA);
+    gl.uniform2fv(u.uSeedB, seedB);
+    gl.uniform1f(u.uMix, mixT);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    return mixT < 1;
+  }
+
+  // With reduced motion the field stays still and redraws only when something changes.
+  let pending = false;
+  function requestStill() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame((now) => {
+      pending = false;
+      if (draw(now)) requestStill();
+    });
+  }
 
   // Clicking anywhere on the cloth (including "New universe") reprints it; the label is exempt.
   document.body.addEventListener('click', (e) => {
-    if (!e.target.closest('.label')) reprint(randomSeed());
+    if (e.target.closest('.label')) return;
+    seedA = seedB;
+    seedB = randomSeed();
+    reseedAt = performance.now();
+    if (reduceMotion) requestStill();
   });
 
-  // The cloth slowly keeps changing on its own.
-  if (!reduceMotion) {
-    setInterval(() => { if (!document.hidden) reprint(randomSeed()); }, DRIFT_MS);
+  if (reduceMotion) {
+    addEventListener('scroll', requestStill, {passive: true});
+    addEventListener('resize', requestStill);
+    requestStill();
+  } else {
+    requestAnimationFrame(function frame(now) {
+      draw(now);
+      requestAnimationFrame(frame);
+    });
   }
-
-  // Repaint when the page changes size. Ignore small height changes so
-  // mobile toolbars sliding in and out don't trigger a repaint.
-  let resizeTimer, lastW = cloth.clientWidth, lastH = cloth.clientHeight;
-  new ResizeObserver(() => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      const w = cloth.clientWidth, h = cloth.clientHeight;
-      if (w === lastW && Math.abs(h - lastH) < 120) return;
-      lastW = w; lastH = h;
-      const canvas = cloth.querySelector('.field:last-of-type');
-      paint(canvas, Number(canvas.dataset.seed));
-    }, 250);
-  }).observe(cloth);
 })();
